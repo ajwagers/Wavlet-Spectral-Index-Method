@@ -3,7 +3,7 @@ import pandas as pd
 # Define column names based on your dm15.dat file structure
 col_names = ['SN_name', 'SN_dm15', 'SN_dm15source', 'SN_datasource', 'SN_z', ...] 
 
-dm15_df = pd.read_csv(r'C:\Users\ajwag\Documents\Code\TAMU\TAMU_research_old\IDL_Archive\dm15.dat', 
+dm15_df = pd.read_csv(r'C./dm15.dat', 
                       names=col_names, 
                       delimiter=',')
 
