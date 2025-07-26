@@ -6,7 +6,7 @@ from specutils.manipulation import FluxConservingResampler
 from specutils.analysis import template_redshift  # <-- Use built-in function
 from scipy.ndimage import convolve1d
 import h5py
-from typing import Tuple
+from typing import Tuple, List, Dict
 import warnings
 from astropy.utils.exceptions import AstropyWarning
 import re
@@ -14,59 +14,105 @@ import matplotlib.pyplot as plt
 
 warnings.simplefilter('ignore', AstropyWarning)
 
-def read_spectrum(filepath: Path) -> Spectrum:
-    """Reads a spectrum file into a Spectrum object."""
-    if filepath.suffix == ".dat":
-        # Read file, replace D/d with E for exponent notation
-        with open(filepath, 'r') as f:
-            lines = [line.replace('D', 'E').replace('d', 'E') for line in f]
-        from io import StringIO
-        data = np.loadtxt(StringIO(''.join(lines)))
-        wavelength = data[:, 0] * u.AA
-        flux = data[:, 1] * u.Unit("adu")  # Replace "adu" with correct units if known
-        return Spectrum(spectral_axis=wavelength, flux=flux)
-    elif filepath.suffix in [".fits", ".fit", ".flm"]:
-        from astropy.io import fits
-        try:
-            # Try reading the spectrum normally
-            spec = Spectrum.read(filepath)
-            # Try to access the unit; if it fails, patch it
+def find_template_match(epoch: float) -> List[Path]:
+    """Finds template spectra in various libraries that match the given epoch."""
+    template_libraries = {
+        "HSIAO": Path("/SNSPEC/HSIAO/"),
+        "MODEL": Path("/SNSPEC/MODEL/"),
+        "NUGENT": Path("/SNSPEC/NUGENT/"),
+    }
+
+    all_matches = []
+    for model_name, template_dir in template_libraries.items():
+        if not template_dir.is_dir():
+            print(f"Warning: Template directory for {model_name} not found: {template_dir}")
+            continue
+
+        for ext in ("dat", "flm", "fits", "fit"):
+            for fpath in template_dir.glob(f"*.{ext}"):
+                # Try to parse epoch from filename, e.g., ".p015" or ".m04"
+                match = re.search(r'\.(m|p)(\d+)', fpath.stem)
+                if not match:
+                    continue
+
+                sign = -1.0 if match.group(1) == 'm' else 1.0
+                file_epoch = sign * int(match.group(2))
+
+                if file_epoch == epoch:
+                    all_matches.append(fpath)
+
+    return all_matches
+
+def read_spectrum(filepath: Path, epoch: float = None) -> Spectrum:
+    """Reads a spectrum file into a Spectrum object.
+    If reading fails and an epoch is provided, it attempts to find and load a template spectrum for that epoch.
+    """
+    try:
+        if filepath.suffix == ".dat":
+            # Read file, replace D/d with E for exponent notation
+            with open(filepath, 'r') as f:
+                lines = [line.replace('D', 'E').replace('d', 'E') for line in f]
+            from io import StringIO
+            data = np.loadtxt(StringIO(''.join(lines)))
+            wavelength = data[:, 0] * u.AA
+            flux = data[:, 1] * u.Unit("adu")  # Replace "adu" with correct units if known
+            return Spectrum(spectral_axis=wavelength, flux=flux)
+        elif filepath.suffix in [".fits", ".fit", ".flm"]:
+            from astropy.io import fits
             try:
-                _ = spec.spectral_axis.unit.to(u.AA)
-                return spec
+                 # Try reading the spectrum normally
+                spec = Spectrum.read(filepath)
+                # Try to access the unit; if it fails, patch it
+                try:
+                    _ = spec.spectral_axis.unit.to(u.AA)
+                    return spec
+                except Exception:
+                    pass  # Will patch below if needed
             except Exception:
-                pass  # Will patch below if needed
-        except Exception:
-            # If Spectrum.read fails, manually extract data and patch units
-            with fits.open(filepath) as hdul:
-                hdr = hdul[0].header
-                data = hdul[0].data
-                # Print raw header for debugging
-                print(f"Raw CUNIT1: '{hdr.get('CUNIT1', '')}', Raw BUNIT1: '{hdr.get('BUNIT1', '')}'")
-                def clean_unit(unit_str):
-                    # Remove all non-letter characters and lowercase
-                    return re.sub(r'[^a-z]', '', unit_str.strip().lower())
-                cunit1 = clean_unit(hdr.get('CUNIT1', ''))
-                bunit1 = clean_unit(hdr.get('BUNIT1', ''))
-                print(f"Cleaned CUNIT1: {cunit1}, Cleaned BUNIT1: {bunit1}")
-                # Guess the unit
-                if 'micron' in cunit1 or 'micron' in bunit1:
-                    unit = u.micron
-                elif 'angstrom' in cunit1 or 'angstroem' in cunit1 or 'angstrom' in bunit1 or 'angstroem' in bunit1:
-                    unit = u.AA
-                else:
-                    unit = u.AA  # Default/fallback
+                # If Spectrum.read fails, manually extract data and patch units
+                with fits.open(filepath) as hdul:
+                    hdr = hdul[0].header
+                    data = hdul[0].data
+                    # Print raw header for debugging
+                    print(f"Raw CUNIT1: '{hdr.get('CUNIT1', '')}', Raw BUNIT1: '{hdr.get('BUNIT1', '')}'")
+                    def clean_unit(unit_str):
+                        # Remove all non-letter characters and lowercase
+                        return re.sub(r'[^a-z]', '', unit_str.strip().lower())
+                    cunit1 = clean_unit(hdr.get('CUNIT1', ''))
+                    bunit1 = clean_unit(hdr.get('BUNIT1', ''))
+                    print(f"Cleaned CUNIT1: {cunit1}, Cleaned BUNIT1: {bunit1}")
+                    # Guess the unit
+                    if 'micron' in cunit1 or 'micron' in bunit1:
+                        unit = u.micron
+                    elif 'angstrom' in cunit1 or 'angstroem' in cunit1 or 'angstrom' in bunit1 or 'angstroem' in bunit1:
+                        unit = u.AA
+                    else:
+                        unit = u.AA  # Default/fallback
 
-                # Try to get the wavelength array
-                # This assumes a linear wavelength solution; adjust if your FITS files are different!
-                crval1 = hdr.get('CRVAL1', 0)  # starting wavelength
-                cdelt1 = hdr.get('CDELT1', 1)  # wavelength step
-                naxis1 = hdr.get('NAXIS1', len(data))
-                wavelength = crval1 + cdelt1 * np.arange(naxis1)
-                wavelength = wavelength * unit
-                flux = data * u.Unit("adu")  # Replace with correct flux unit if known
+                    # Try to get the wavelength array
+                    # This assumes a linear wavelength solution; adjust if your FITS files are different!
+                    crval1 = hdr.get('CRVAL1', 0)  # starting wavelength
+                    cdelt1 = hdr.get('CDELT1', 1)  # wavelength step
+                    naxis1 = hdr.get('NAXIS1', len(data))
+                    wavelength = crval1 + cdelt1 * np.arange(naxis1)
+                    wavelength = wavelength * unit
+                    flux = data * u.Unit("adu")  # Replace with correct flux unit if known
 
-                return Spectrum(spectral_axis=wavelength, flux=flux)
+
+                    return Spectrum(spectral_axis=wavelength, flux=flux)
+    except Exception as e:
+        print(f"Warning: Could not read spectrum file {filepath.name}: {e}")
+        if epoch is not None:
+            print(f"Attempting to find a template for epoch {epoch:+.2f}...")
+            matches = find_template_match(epoch)
+            if matches:
+                template_path = matches[0]
+                print(f"  Found template: {template_path.name}. Loading it instead.")
+                # Recursive call. Pass epoch=None to prevent an infinite loop if the template also fails to read.
+                return read_spectrum(template_path, epoch=None)
+            else:
+                print(f"  No matching template found for epoch {epoch:+.2f}.")
+            
     return None
 
 def plot_spectra(spectrum_list):

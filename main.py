@@ -49,7 +49,7 @@ def main():
             print(f"  Processing epoch: {epoch:+.2f}")
 
             # 1. Read spectrum
-            spec = preprocessing.read_spectrum(spec_file)
+            spec = preprocessing.read_spectrum(spec_file, epoch=epoch)
             if spec is None:
                 continue
 

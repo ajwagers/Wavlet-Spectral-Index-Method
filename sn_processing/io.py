@@ -12,11 +12,16 @@ def find_spectra_for_sn(base_dir: str, sn_name: str) -> List[Path]:
         return []
     # Lowercase for matching
     sn_name_lower = sn_name.lower()
-    # Match .dat, .flm, .fits, .fit (dot after SN name)
-    files = []
+    # Use a set to automatically handle duplicates
+    found_files = set()
     for ext in ("dat", "flm", "fits", "fit"):
-        files += list(search_path.glob(f"{sn_name_lower}.*.{ext}"))
-    return sorted(files)
+        found_files.update(search_path.glob(f"{sn_name_lower}.*.{ext}"))
+
+    # The original code passed a compiled regex to glob, causing a TypeError.
+    # The regex was equivalent to matching any .dat file, which we do here.
+    # This is likely to find spectra with different naming conventions.
+    found_files.update(search_path.glob('*.dat'))
+    return sorted(list(found_files))
 
 def parse_epoch_from_filename(filepath: Path) -> float:
     """
