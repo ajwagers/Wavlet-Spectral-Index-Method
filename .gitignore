@@ -7,3 +7,5 @@ supernova-py/
 .vscode/
 sn_processing/__pycache__/
 results/spectral_features.h5
+sn_processing/__pycache__/io.cpython-313.pyc
+sn_processing/__pycache__/preprocessing.cpython-313.pyc
