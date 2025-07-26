@@ -21,7 +21,10 @@ def find_spectra_for_sn(base_dir: str, sn_name: str) -> List[Path]:
     # The regex was equivalent to matching any .dat file, which we do here.
     # This is likely to find spectra with different naming conventions.
     found_files.update(search_path.glob('*.dat'))
-    return sorted(list(found_files))
+
+    # Filter out hidden files (e.g., .DS_Store on macOS) that start with a dot.
+    visible_files = [f for f in found_files if not f.name.startswith('.')]
+    return sorted(visible_files)
 
 def parse_epoch_from_filename(filepath: Path) -> float:
     """

@@ -5,3 +5,5 @@ Notes.md
 sn_roadmap.md
 supernova-py/
 .vscode/
+sn_processing/__pycache__/
+results/spectral_features.h5
