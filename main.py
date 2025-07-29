@@ -48,7 +48,10 @@ def main():
                 continue
             print(f"  Processing epoch: {epoch:+.2f}")
 
-            # 1. Read spectrum
+            # 1. Read spectrum and metadata
+            metadata = io.extract_fits_metadata(spec_file)
+            if metadata.get('object'):
+                print(f"    - Object from FITS header: {metadata['object']}")
             spec = preprocessing.read_spectrum(spec_file, epoch=epoch)
             if spec is None:
                 continue
