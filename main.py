@@ -65,7 +65,11 @@ def main():
             # 3. Bin and Pad
             # Example: bin to 5 Angstroms
             binned_spec = preprocessing.bin_spectrum_constant_wavelength(spec, 5 * u.AA)
-            wl, flux = preprocessing.pad_spectrum_for_wavelet(binned_spec)
+            if binned_spec.uncertainty is not None:
+                print(f"    - Propagating uncertainties through binning and padding.")
+            else:
+                print(f"    - No uncertainty data found to propagate.")
+            wl, flux, uncertainty = preprocessing.pad_spectrum_for_wavelet(binned_spec)
 
             # 4. Wavelet Transform
             wavelet_coeffs = preprocessing.atrous_transform(flux, NUM_WAVELET_SCALES)
@@ -83,6 +87,7 @@ def main():
             results_to_save = {
                 'wavelengths': wl,
                 'binned_flux': flux,
+                'binned_uncertainty': uncertainty,
                 'wavelet_coeffs': wavelet_coeffs,
                 'wavelet_sum_234': wavelet_sum,
                 'chi_indices': np.array(list(chi_indices.values())),

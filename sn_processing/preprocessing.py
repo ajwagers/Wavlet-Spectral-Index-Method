@@ -17,7 +17,9 @@ from sn_processing import io
 warnings.simplefilter('ignore', AstropyWarning)
 
 def read_spectrum(filepath: Path, epoch: float = None) -> Spectrum:
-    """Reads a spectrum file into a Spectrum object.
+    """
+    Reads a spectrum file into a specutils.Spectrum object, including uncertainty if available.
+
     If reading fails and an epoch is provided, it attempts to find and load a template spectrum for that epoch.
     """
     try:
@@ -28,8 +30,13 @@ def read_spectrum(filepath: Path, epoch: float = None) -> Spectrum:
             from io import StringIO
             data = np.loadtxt(StringIO(''.join(lines)))
             wavelength = data[:, 0] * u.AA
-            flux = data[:, 1] * u.Unit("adu")  # Replace "adu" with correct units if known
-            return Spectrum(spectral_axis=wavelength, flux=flux)
+            flux = data[:, 1] * u.Unit("adu")  # Placeholder unit
+            uncertainty = None
+            if data.shape[1] > 2:
+                from astropy.nddata import StdDevUncertainty
+                print(f"  Found 3 columns in .dat file, assuming 3rd is uncertainty.")
+                uncertainty = StdDevUncertainty(data[:, 2] * flux.unit)
+            return Spectrum(spectral_axis=wavelength, flux=flux, uncertainty=uncertainty)
         elif filepath.suffix in [".fits", ".fit", ".flm"]:
             from astropy.io import fits
             try:
@@ -45,6 +52,7 @@ def read_spectrum(filepath: Path, epoch: float = None) -> Spectrum:
                 # If Spectrum.read fails, manually extract data and patch units
                 with fits.open(filepath) as hdul:
                     hdr = hdul[0].header
+                    from astropy.nddata import StdDevUncertainty
                     data = hdul[0].data
                     # Print raw header for debugging
                     print(f"Raw CUNIT1: '{hdr.get('CUNIT1', '')}', Raw BUNIT1: '{hdr.get('BUNIT1', '')}'")
@@ -69,10 +77,15 @@ def read_spectrum(filepath: Path, epoch: float = None) -> Spectrum:
                     naxis1 = hdr.get('NAXIS1', len(data))
                     wavelength = crval1 + cdelt1 * np.arange(naxis1)
                     wavelength = wavelength * unit
-                    flux = data * u.Unit("adu")  # Replace with correct flux unit if known
+                    flux = data * u.Unit("adu")  # Placeholder, should ideally come from BUNIT
+                    uncertainty = None
+                    # Check for uncertainty in a second HDU, a common convention
+                    if len(hdul) > 1 and hdul[1].data is not None:
+                        print(f"  Found uncertainty data in HDU 1.")
+                        # Assuming the uncertainty has the same unit as the flux
+                        uncertainty = StdDevUncertainty(hdul[1].data * flux.unit)
 
-
-                    return Spectrum(spectral_axis=wavelength, flux=flux)
+                    return Spectrum(spectral_axis=wavelength, flux=flux, uncertainty=uncertainty)
     except Exception as e:
         print(f"Warning: Could not read spectrum file {filepath.name}: {e}")
         if epoch is not None:
@@ -251,13 +264,17 @@ def bin_spectrum_constant_wavelength(spec: Spectrum, bin_width: u.Quantity) -> S
     resampler = FluxConservingResampler(extrapolation_treatment='zero_fill')
     return resampler(spec, new_grid)
 
-def pad_spectrum_for_wavelet(spec: Spectrum, final_size: int = 4096) -> Tuple[np.ndarray, np.ndarray]:
-    """Pads the spectrum to a power of two, matching IDL logic."""
+def pad_spectrum_for_wavelet(spec: Spectrum, final_size: int = 4096) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Pads the spectrum's wavelength, flux, and uncertainty to a power of two.
+    """
     current_size = len(spec.flux)
     if current_size >= final_size:
-        return spec.spectral_axis.value, spec.flux.value
+        uncertainty_array = spec.uncertainty.array if spec.uncertainty is not None else np.zeros_like(spec.flux.value)
+        return spec.spectral_axis.value, spec.flux.value, uncertainty_array
 
     padded_flux = np.zeros(final_size)
+    padded_uncertainty = np.zeros(final_size)
     padded_flux[:current_size] = spec.flux.value
 
     # Extrapolate wavelength axis
@@ -265,15 +282,105 @@ def pad_spectrum_for_wavelet(spec: Spectrum, final_size: int = 4096) -> Tuple[np
     start_lam = spec.spectral_axis[0].value
     padded_wl = start_lam + np.arange(final_size) * delta_lam.value
 
+    # Handle uncertainty padding
+    if spec.uncertainty is not None:
+        padded_uncertainty[:current_size] = spec.uncertainty.array
+        # Fill the rest with a high value (max uncertainty) to indicate low confidence
+        fill_value = np.max(spec.uncertainty.array)
+        padded_uncertainty[current_size:] = fill_value
+    else:
+        # If no uncertainty, the padded array remains zeros
+        pass
+
     # Fill extra points with a decaying exponential to minimize edge effects
     # This is a simple approximation of the IDL logic.
-    fill_value = np.mean(spec.flux.value[-10:]) # Mean of last 10 points
+    flux_fill_value = np.mean(spec.flux.value[-10:]) # Mean of last 10 points
     decay_factor = 0.99
     for i in range(current_size, final_size):
-        fill_value *= decay_factor
-        padded_flux[i] = fill_value
+        flux_fill_value *= decay_factor
+        padded_flux[i] = flux_fill_value
 
-    return padded_wl, padded_flux
+    return padded_wl, padded_flux, padded_uncertainty
+
+
+def add_poisson_noise(spectrum: Spectrum, target_snr: float) -> Spectrum:
+    """
+    Adds Poisson-like noise to a spectrum to achieve a target signal-to-noise ratio.
+
+    This function simulates the noise profile of a photon-counting instrument.
+    It scales the flux to an equivalent number of "counts" where the desired SNR
+    is met at a reference flux level (here, the median flux), adds Poisson noise,
+    and then scales the flux and new uncertainty back to the original units.
+
+    Args:
+        spectrum (Spectrum): The input, relatively noise-free spectrum.
+        target_snr (float): The desired signal-to-noise ratio at the median flux level.
+
+    Returns:
+        A new Spectrum object with the added noise and a corresponding uncertainty array.
+    """
+    if target_snr <= 0:
+        raise ValueError("Target SNR must be positive.")
+
+    # Use the median flux as the reference signal level.
+    # Ensure we don't take the median of zero-padded regions.
+    non_zero_flux = spectrum.flux[spectrum.flux.value > 0]
+    if len(non_zero_flux) == 0:
+        # If all flux is zero, return the original spectrum
+        return spectrum
+
+    ref_flux_val = np.median(non_zero_flux.value)
+    if ref_flux_val <= 0:
+        # Handle cases where median is still zero or negative by falling back to mean
+        ref_flux_val = np.mean(non_zero_flux.value)
+        if ref_flux_val <= 0:
+             raise ValueError("Cannot add noise to a spectrum with no positive flux.")
+
+    # For Poisson noise, SNR = sqrt(signal_in_counts).
+    # So, signal_in_counts = SNR^2.
+    # We find a scaling factor 'k' to convert flux to counts such that
+    # k * ref_flux_val = target_snr**2.
+    k = target_snr**2 / ref_flux_val
+
+    # Convert the entire flux array to "effective counts".
+    # Ensure counts are non-negative for the Poisson distribution.
+    flux_in_counts = np.maximum(0, spectrum.flux.value * k)
+
+    # Generate a new flux array by sampling from a Poisson distribution.
+    noisy_flux_in_counts = np.random.poisson(flux_in_counts)
+
+    # Convert the noisy counts back to the original flux units.
+    noisy_flux_values = noisy_flux_in_counts / k
+    noisy_flux = noisy_flux_values * spectrum.flux.unit
+
+    # The uncertainty of a Poisson process is sqrt(counts).
+    # Propagate this back to flux units.
+    from astropy.nddata import StdDevUncertainty
+    # Use max(1,...) to avoid sqrt(0) which can be problematic.
+    uncertainty_values = np.sqrt(np.maximum(1, noisy_flux_in_counts)) / k
+    uncertainty = StdDevUncertainty(uncertainty_values * spectrum.flux.unit)
+
+    # Create and return the new spectrum object.
+    return Spectrum(
+        spectral_axis=spectrum.spectral_axis,
+        flux=noisy_flux,
+        uncertainty=uncertainty
+    )
+
+
+def generate_monte_carlo_spectra(
+    base_spectrum: Spectrum, snr_levels: List[float], num_realizations: int = 1
+) -> Dict[float, List[Spectrum]]:
+    """
+    Generates multiple realizations of a spectrum with different noise levels for Monte Carlo.
+    """
+    mc_spectra = {}
+    for snr in snr_levels:
+        mc_spectra[snr] = []
+        for _ in range(num_realizations):
+            noisy_spec = add_poisson_noise(base_spectrum, snr)
+            mc_spectra[snr].append(noisy_spec)
+    return mc_spectra
 
 
 def atrous_transform(signal: np.ndarray, num_scales: int) -> np.ndarray:
