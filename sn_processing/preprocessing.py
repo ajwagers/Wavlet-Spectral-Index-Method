@@ -3,45 +3,18 @@ from specutils import Spectrum  # instead of Spectrum1D
 import numpy as np
 import astropy.units as u
 from specutils.manipulation import FluxConservingResampler
-from specutils.analysis import template_redshift  # <-- Use built-in function
 from scipy.ndimage import convolve1d
+from scipy import signal
+from scipy.interpolate import interp1d
 import h5py
 from typing import Tuple, List, Dict
 import warnings
 from astropy.utils.exceptions import AstropyWarning
 import re
 import matplotlib.pyplot as plt
+from sn_processing import io
 
 warnings.simplefilter('ignore', AstropyWarning)
-
-def find_template_match(epoch: float) -> List[Path]:
-    """Finds template spectra in various libraries that match the given epoch."""
-    template_libraries = {
-        "HSIAO": Path("/SNSPEC/HSIAO/"),
-        "MODEL": Path("/SNSPEC/MODEL/"),
-        "NUGENT": Path("/SNSPEC/NUGENT/"),
-    }
-
-    all_matches = []
-    for model_name, template_dir in template_libraries.items():
-        if not template_dir.is_dir():
-            print(f"Warning: Template directory for {model_name} not found: {template_dir}")
-            continue
-
-        for ext in ("dat", "flm", "fits", "fit"):
-            for fpath in template_dir.glob(f"*.{ext}"):
-                # Try to parse epoch from filename, e.g., ".p015" or ".m04"
-                match = re.search(r'\.(m|p)(\d+)', fpath.stem)
-                if not match:
-                    continue
-
-                sign = -1.0 if match.group(1) == 'm' else 1.0
-                file_epoch = sign * int(match.group(2))
-
-                if file_epoch == epoch:
-                    all_matches.append(fpath)
-
-    return all_matches
 
 def read_spectrum(filepath: Path, epoch: float = None) -> Spectrum:
     """Reads a spectrum file into a Spectrum object.
@@ -104,7 +77,7 @@ def read_spectrum(filepath: Path, epoch: float = None) -> Spectrum:
         print(f"Warning: Could not read spectrum file {filepath.name}: {e}")
         if epoch is not None:
             print(f"Attempting to find a template for epoch {epoch:+.2f}...")
-            matches = find_template_match(epoch)
+            matches = io.find_template_match(epoch)
             if matches:
                 template_path = matches[0]
                 print(f"  Found template: {template_path.name}. Loading it instead.")
@@ -140,20 +113,134 @@ def plot_spectra(spectrum_list):
     ax.legend()
     plt.show()
 
-def find_best_redshift(observed_spec: Spectrum, template_spec: Spectrum, z_search_range: np.ndarray) -> float:
+
+def measure_redshift_from_template(
+    observed_spectrum: Spectrum,
+    template_spectrum: Spectrum,
+    resampling_points: int = 2000
+) -> Tuple[float, float]:
     """
-    Finds the best redshift by cross-correlating an observed spectrum with a template,
-    using specutils.analysis.template_redshift.
+    Measures the redshift of an observed spectrum by cross-correlating with a template.
+
+    The method works by:
+    1. Finding the overlapping wavelength range between the two spectra.
+    2. Resampling both spectra onto a common, linearly-spaced log-wavelength grid.
+       A multiplicative shift in wavelength (due to redshift) becomes an additive
+       shift in log-wavelength space, which is ideal for cross-correlation.
+    3. Performing a cross-correlation on the resampled flux values.
+    4. Finding the peak of the cross-correlation function.
+    5. Converting the lag at the peak back into a redshift value.
+
+    Args:
+        observed_spectrum (Spectrum): The observed supernova spectrum (`specutils.Spectrum`).
+        template_spectrum (Spectrum): The template spectrum at z=0 (`specutils.Spectrum`).
+        resampling_points (int): The number of points for the log-wavelength grid.
+
+    Returns:
+        A tuple containing:
+        - measured_redshift (float): The calculated redshift.
+        - correlation_peak (float): The peak value of the cross-correlation function,
+                                    indicating the quality of the fit.
     """
-    result = template_redshift(
-        observed_spec,
-        template_spec,
-        z_search_range,
-        resample_method='flux_conserving',
-        extrapolation_treatment='truncate'
+    # 1. Determine the overlapping wavelength range.
+    common_wave_min = max(
+        observed_spectrum.spectral_axis.min(), template_spectrum.spectral_axis.min()
     )
-    # result[1] is the best-fit redshift
-    return result[1]
+    common_wave_max = min(
+        observed_spectrum.spectral_axis.max(), template_spectrum.spectral_axis.max()
+    )
+
+    if common_wave_min >= common_wave_max:
+        raise ValueError("Observed spectrum and template have no overlapping wavelength range.")
+
+    # 2. Create a common log-wavelength grid and interpolate both spectra onto it.
+    log_wave_grid = np.linspace(
+        np.log10(common_wave_min.value),
+        np.log10(common_wave_max.value),
+        resampling_points
+    )
+
+    obs_interp = interp1d(
+        np.log10(observed_spectrum.spectral_axis.value),
+        observed_spectrum.flux.value,
+        bounds_error=False,
+        fill_value=0.0
+    )
+    template_interp = interp1d(
+        np.log10(template_spectrum.spectral_axis.value),
+        template_spectrum.flux.value,
+        bounds_error=False,
+        fill_value=0.0
+    )
+
+    resampled_obs_flux = obs_interp(log_wave_grid)
+    resampled_template_flux = template_interp(log_wave_grid)
+
+    # Normalize fluxes for robust correlation
+    resampled_obs_flux = (resampled_obs_flux - np.mean(resampled_obs_flux)) / np.std(resampled_obs_flux)
+    resampled_template_flux = (resampled_template_flux - np.mean(resampled_template_flux)) / np.std(resampled_template_flux)
+
+    # 3. Perform cross-correlation
+    correlation = signal.correlate(resampled_obs_flux, resampled_template_flux, mode='same')
+
+    # 4. Find the peak of the correlation
+    peak_index = np.argmax(correlation)
+    correlation_peak = correlation[peak_index]
+
+    # 5. Convert the lag (shift in array index) to a redshift
+    center_index = len(correlation) // 2
+    lag = peak_index - center_index
+    log_wave_step = log_wave_grid[1] - log_wave_grid[0]
+    log_z_shift = lag * log_wave_step  # This is log10(1+z)
+
+    measured_redshift = 10**log_z_shift - 1
+
+    return measured_redshift, correlation_peak
+
+
+def find_best_redshift(
+    observed_spectrum: Spectrum,
+    template_spectra: List[Spectrum],
+    **kwargs
+) -> Tuple[float, float, Spectrum]:
+    """
+    Finds the best-fit redshift by comparing an observed spectrum against multiple templates.
+
+    This function iterates through a list of template spectra (e.g., representing
+    different supernova epochs), measures the redshift against each one using
+    cross-correlation, and selects the template that yields the highest
+    correlation score.
+
+    Args:
+        observed_spectrum (Spectrum): The observed supernova spectrum (`specutils.Spectrum`).
+        template_spectra (List[Spectrum]): A list of template spectra to match against.
+        **kwargs: Keyword arguments to pass to `measure_redshift_from_template`.
+
+    Returns:
+        A tuple containing:
+        - best_redshift (float): The redshift from the best-fitting template.
+        - best_correlation_score (float): The peak correlation score for the best fit.
+        - best_template (Spectrum): The template spectrum that gave the best fit.
+    """
+    if not template_spectra:
+        raise ValueError("template_spectra list cannot be empty.")
+
+    results = []
+    for template in template_spectra:
+        try:
+            redshift, score = measure_redshift_from_template(observed_spectrum, template, **kwargs)
+            results.append((score, redshift, template))
+        except ValueError:
+            continue  # Skip templates with no wavelength overlap
+
+    if not results:
+        raise RuntimeError("Could not find a suitable redshift for any of the provided templates.")
+
+    # Find the result with the maximum correlation score
+    best_score, best_redshift, best_template = max(results, key=lambda item: item[0])
+
+    return best_redshift, best_score, best_template
+
 
 def bin_spectrum_constant_wavelength(spec: Spectrum, bin_width: u.Quantity) -> Spectrum:
     """Resamples a spectrum to a new grid with constant wavelength steps."""

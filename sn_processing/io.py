@@ -7,6 +7,35 @@ from functools import lru_cache
 from typing import Any
 from astropy.io import fits
 
+def find_template_match(epoch: float) -> List[Path]:
+    """Finds template spectra in various libraries that match the given epoch."""
+    template_libraries = {
+        "HSIAO": Path("/SNSPEC/HSIAO/"),
+        "MODEL": Path("/SNSPEC/MODEL/"),
+        "NUGENT": Path("/SNSPEC/NUGENT/"),
+    }
+
+    all_matches = []
+    for model_name, template_dir in template_libraries.items():
+        if not template_dir.is_dir():
+            print(f"Warning: Template directory for {model_name} not found: {template_dir}")
+            continue
+
+        for ext in ("dat", "flm", "fits", "fit"):
+            for fpath in template_dir.glob(f"*.{ext}"):
+                # Try to parse epoch from filename, e.g., ".p015" or ".m04"
+                match = re.search(r'\.(m|p)(\d+)', fpath.stem)
+                if not match:
+                    continue
+
+                sign = -1.0 if match.group(1) == 'm' else 1.0
+                file_epoch = sign * int(match.group(2))
+
+                if file_epoch == epoch:
+                    all_matches.append(fpath)
+
+    return all_matches
+
 def find_spectra_for_sn(base_dir: str, sn_name: str) -> List[Path]:
     """Finds all spectrum files for a given supernova."""
     folder_name = sn_name[2:] if sn_name.lower().startswith("sn") else sn_name
