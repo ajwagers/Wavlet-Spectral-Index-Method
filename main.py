@@ -20,6 +20,7 @@ FEATURE_DEFINITIONS = {
     # Add other features from your notes...
 }
 NUM_WAVELET_SCALES = 5 # Example value
+SCALES_TO_SUM = [2, 3, 4] # Scales to sum for feature extraction
 
 # This would typically be loaded from a file (e.g., a CSV or JSON).
 # See sn_processing/io.py for more details.
@@ -76,12 +77,12 @@ def main():
 
             # 5. Feature Measurement
             # The IDL code summed scales 2, 3, and 4 (0-indexed: 1, 2, 3)
-            wavelet_sum = np.sum(wavelet_coeffs[1:4], axis=0)
-
-            chi_indices = {}
-            for feature_name, (wl_min, wl_max) in FEATURE_DEFINITIONS.items():
-                chi = wavelets.calculate_chi_index(wavelet_sum, wl, wl_min, wl_max)
-                chi_indices[feature_name] = chi
+            wavelet_sum = wavelets.sum_wavelet_scales(
+                wavelet_coeffs, scales_to_sum=SCALES_TO_SUM
+            )
+            chi_indices = wavelets.extract_features(
+                wavelet_sum, wl, FEATURE_DEFINITIONS
+            )
 
             # 6. Save results
             results_to_save = {

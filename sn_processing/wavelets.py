@@ -5,6 +5,7 @@ This module contains functions for performing the à trous wavelet transform
 and extracting spectral features from the wavelet coefficients.
 """
 import numpy as np
+from typing import List, Dict, Tuple
 from scipy.ndimage import convolve1d
 
 
@@ -46,6 +47,32 @@ def atrous_transform(signal: np.ndarray, num_scales: int) -> np.ndarray:
     return np.array(wavelet_coeffs)
 
 
+def sum_wavelet_scales(
+    wavelet_coeffs: np.ndarray,
+    scales_to_sum: List[int]
+) -> np.ndarray:
+    """
+    Sums specific wavelet scales from the coefficient array.
+
+    Args:
+        wavelet_coeffs: The 2D array of wavelet coefficients from `atrous_transform`.
+        scales_to_sum: A list of 1-based indices of the scales to sum
+                       (e.g., [2, 3, 4]).
+
+    Returns:
+        A 1D numpy array representing the sum of the selected wavelet scales.
+    """
+    # Convert 1-based user-facing scales to 0-based numpy indices
+    indices_to_sum = [s - 1 for s in scales_to_sum]
+
+    # Validate indices
+    num_scales = wavelet_coeffs.shape[0] - 1
+    for i in indices_to_sum:
+        if not 0 <= i < num_scales:
+            raise ValueError(f"Invalid scale index {i+1}. Available scales are 1 to {num_scales}.")
+
+    return np.sum(wavelet_coeffs[indices_to_sum], axis=0)
+
 def calculate_chi_index(
     wavelet_sum: np.ndarray,
     spectral_axis: np.ndarray,
@@ -75,3 +102,26 @@ def calculate_chi_index(
     chi_index = np.sum(np.abs(feature_wavelet_sum)) / std_dev
     return chi_index
 
+
+def extract_features(
+    wavelet_sum: np.ndarray,
+    spectral_axis: np.ndarray,
+    feature_definitions: Dict[str, Tuple[float, float]]
+) -> Dict[str, float]:
+    """
+    Calculates the chi index for multiple predefined spectral features.
+
+    Args:
+        wavelet_sum: The 1D array of the summed wavelet scales.
+        spectral_axis: The corresponding 1D wavelength array.
+        feature_definitions: A dictionary mapping feature names to their
+                             (min_wl, max_wl) tuples.
+
+    Returns:
+        A dictionary mapping feature names to their calculated chi index.
+    """
+    chi_indices = {}
+    for feature_name, (wl_min, wl_max) in feature_definitions.items():
+        chi = calculate_chi_index(wavelet_sum, spectral_axis, wl_min, wl_max)
+        chi_indices[feature_name] = chi
+    return chi_indices
