@@ -1,4 +1,4 @@
-from sn_processing import io, preprocessing
+from sn_processing import io, preprocessing, wavelets
 import astropy.units as u
 import numpy as np
 from pathlib import Path
@@ -72,7 +72,7 @@ def main():
             wl, flux, uncertainty = preprocessing.pad_spectrum_for_wavelet(binned_spec)
 
             # 4. Wavelet Transform
-            wavelet_coeffs = preprocessing.atrous_transform(flux, NUM_WAVELET_SCALES)
+            wavelet_coeffs = wavelets.atrous_transform(flux, NUM_WAVELET_SCALES)
 
             # 5. Feature Measurement
             # The IDL code summed scales 2, 3, and 4 (0-indexed: 1, 2, 3)
@@ -80,7 +80,7 @@ def main():
 
             chi_indices = {}
             for feature_name, (wl_min, wl_max) in FEATURE_DEFINITIONS.items():
-                chi = preprocessing.calculate_chi_index(wavelet_sum, wl, wl_min, wl_max)
+                chi = wavelets.calculate_chi_index(wavelet_sum, wl, wl_min, wl_max)
                 chi_indices[feature_name] = chi
 
             # 6. Save results
