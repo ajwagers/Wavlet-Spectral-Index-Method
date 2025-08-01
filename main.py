@@ -6,6 +6,7 @@ from pathlib import Path
 # --- Configuration ---
 DATA_DIR = "./SNSPEC"
 OUTPUT_FILE = "./results/spectral_features.h5"
+WAVELET_PLOT_DIR = "./results/wavelet_plots"
 
 # Automatically detect all supernovae folders in SNSPEC
 SUPERNOVAE_TO_PROCESS = [
@@ -19,7 +20,7 @@ FEATURE_DEFINITIONS = {
     'SiII_5485': (5300, 5500),
     # Add other features from your notes...
 }
-NUM_WAVELET_SCALES = 5 # Example value
+NUM_WAVELET_SCALES = 10 # Match the IDL implementation
 SCALES_TO_SUM = [2, 3, 4] # Scales to sum for feature extraction
 
 # This would typically be loaded from a file (e.g., a CSV or JSON).
@@ -31,6 +32,9 @@ SUPERNOVA_MAX_LIGHT_DATES = {
 }
 
 def main():
+    # Create the main plot directory to store visualizations
+    Path(WAVELET_PLOT_DIR).mkdir(parents=True, exist_ok=True)
+
     for sn_name in SUPERNOVAE_TO_PROCESS:
         print(f"--- Processing {sn_name} ---")
         spectrum_files = io.find_spectra_for_sn(DATA_DIR, sn_name)
@@ -74,6 +78,17 @@ def main():
 
             # 4. Wavelet Transform
             wavelet_coeffs = wavelets.atrous_transform(flux, NUM_WAVELET_SCALES)
+
+            # 4.5 Visualize Decomposition and save to file
+            plot_filename = f"{sn_name}_epoch_{epoch:+.2f}.png"
+            plot_output_path = Path(WAVELET_PLOT_DIR) / plot_filename
+            wavelets.plot_wavelet_decomposition(
+                spectral_axis=wl,
+                original_signal=flux,
+                wavelet_coeffs=wavelet_coeffs,
+                output_path=plot_output_path,
+                title=f"Wavelet Decomposition for {sn_name} at Epoch {epoch:+.2f}"
+            )
 
             # 5. Feature Measurement
             # The IDL code summed scales 2, 3, and 4 (0-indexed: 1, 2, 3)

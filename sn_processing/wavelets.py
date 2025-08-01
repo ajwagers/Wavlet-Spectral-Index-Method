@@ -5,6 +5,8 @@ This module contains functions for performing the à trous wavelet transform
 and extracting spectral features from the wavelet coefficients.
 """
 import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
 from typing import List, Dict, Tuple
 from scipy.ndimage import convolve1d
 
@@ -125,3 +127,62 @@ def extract_features(
         chi = calculate_chi_index(wavelet_sum, spectral_axis, wl_min, wl_max)
         chi_indices[feature_name] = chi
     return chi_indices
+
+
+def plot_wavelet_decomposition(
+    spectral_axis: np.ndarray,
+    original_signal: np.ndarray,
+    wavelet_coeffs: np.ndarray,
+    output_path: Path,
+    title: str = "Wavelet Decomposition"
+):
+    """
+    Visualizes the à trous wavelet decomposition and saves it to a file.
+
+    Creates a multi-panel plot showing the original signal, each wavelet scale,
+    and the final smoothed residual. The plot is saved to disk and not shown
+    interactively.
+
+    Args:
+        spectral_axis: The 1D wavelength array for the x-axis.
+        original_signal: The original 1D flux array.
+        wavelet_coeffs: The 2D array of wavelet coefficients from `atrous_transform`.
+        output_path: The path where the output plot image will be saved.
+        title: The main title for the plot.
+    """
+    num_scales = wavelet_coeffs.shape[0] - 1
+    num_plots = num_scales + 2  # Original + all scales + residual
+
+    fig, axes = plt.subplots(
+        num_plots, 1, figsize=(12, 2.5 * num_plots), sharex=True, constrained_layout=True
+    )
+    fig.suptitle(title, fontsize=16)
+
+    # Plot Original Signal
+    axes[0].plot(spectral_axis, original_signal, color='black', label='Original Signal')
+    axes[0].set_title("Original Signal")
+    axes[0].set_ylabel("Flux")
+    axes[0].legend(loc='upper right')
+
+    # Plot Wavelet Scales
+    for i in range(num_scales):
+        ax = axes[i + 1]
+        ax.plot(spectral_axis, wavelet_coeffs[i, :], color=f'C{i}', label=f'Scale {i+1}')
+        ax.set_title(f"Wavelet Scale {i + 1}")
+        ax.axhline(0, color='grey', linestyle='--', linewidth=0.8)
+        ax.set_ylabel(f"$w_{i+1}$")
+        ax.legend(loc='upper right')
+
+    # Plot Smoothed Residual
+    ax = axes[num_scales + 1]
+    ax.plot(spectral_axis, wavelet_coeffs[-1, :], color='gray', label='Residual')
+    ax.set_title("Smoothed Residual")
+    ax.set_ylabel("$c_{res}$")
+    ax.set_xlabel("Wavelength (Å)")
+    ax.legend(loc='upper right')
+
+    # Ensure output directory exists and save the figure
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150)
+    plt.close(fig)  # Close the figure to free memory and prevent interactive display
+    print(f"    - Saved wavelet decomposition plot to {output_path}")
