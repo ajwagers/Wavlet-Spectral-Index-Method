@@ -6,6 +6,7 @@ from pathlib import Path
 # --- Configuration ---
 DATA_DIR = "./SNSPEC"
 OUTPUT_FILE = "./results/spectral_features.h5"
+HSIAO_TEMPLATE_PATH = "./SNSPEC/hsiao_template.npz" # Path to the 3D Hsiao template cube
 WAVELET_PLOT_DIR = "./results/wavelet_plots"
 
 # Automatically detect all supernovae folders in SNSPEC
@@ -45,6 +46,10 @@ def main():
     # Create the main plot directory to store visualizations
     Path(WAVELET_PLOT_DIR).mkdir(parents=True, exist_ok=True)
 
+    # Load the 3D Hsiao template data once at the beginning
+    print(f"Loading Hsiao template data from {HSIAO_TEMPLATE_PATH}...")
+    hsiao_data = io.load_hsiao_data_cube(Path(HSIAO_TEMPLATE_PATH))
+
     for sn_name in SUPERNOVAE_TO_PROCESS:
         print(f"--- Processing {sn_name} ---")
         spectrum_files = io.find_spectra_for_sn(DATA_DIR, sn_name)
@@ -53,7 +58,18 @@ def main():
             print(f"No spectra found for {sn_name}. Skipping.")
             continue
 
+        # Get SN parameters for template matching
+        dm15 = io.get_sn_dm15(sn_name)
+        redshift_from_file = io.get_sn_redshift(sn_name)
+
+        # Generate a specific set of templates if dm15 is known
+        templates_for_matching = []
+        if hsiao_data and dm15 is not None:
+            print(f"  Found dm15={dm15:.3f}. Generating specific Hsiao templates for matching.")
+            templates_for_matching = preprocessing.generate_hsiao_templates(dm15, hsiao_data)
+
         spectrum_list = []
+        epoch_list = []
         for spec_file in spectrum_files:
             try:
                 # Pass the lookup dictionary to the parsing function
@@ -71,22 +87,36 @@ def main():
             if spec is None:
                 continue
 
-            # 2. Apply Corrections (De-redshifting and De-reddening)
-            # The correct order is to first correct for redshift to get to the
-            # rest frame, then correct for reddening in the rest frame.
-            redshift = io.get_sn_redshift(sn_name)
+            # 2. Determine redshift and apply corrections
+            redshift_to_use = redshift_from_file
+            if templates_for_matching:
+                try:
+                    print(f"    - Measuring redshift against dm15-specific templates...")
+                    best_z, score, _ = preprocessing.find_best_redshift(spec, templates_for_matching)
+                    print(f"      - Measured z = {best_z:.4f} with score {score:.2f}.")
+                    # Prefer the measured redshift if no file-based one exists.
+                    # You could add more complex logic here to decide which redshift to use.
+                    if redshift_to_use is None:
+                        redshift_to_use = best_z
+                except RuntimeError as e:
+                    print(f"      - Redshift measurement failed: {e}")
+                    if redshift_to_use is None:
+                        print("      - No file redshift available. Cannot proceed with this spectrum.")
+                        continue # Skip to the next spectrum file
+
             ebv = SUPERNOVA_EBV_VALUES.get(sn_name.lower(), 0.0)
 
             corrected_spec = spec
-            if redshift is not None and redshift > 0:
-                print(f"    - Correcting for redshift z = {redshift:.4f}")
-                corrected_spec = preprocessing.correct_for_redshift(corrected_spec, z=redshift)
+            if redshift_to_use is not None and redshift_to_use > 0:
+                print(f"    - Correcting for redshift z = {redshift_to_use:.4f}")
+                corrected_spec = preprocessing.correct_for_redshift(corrected_spec, z=redshift_to_use)
 
             if ebv > 0:
                 print(f"    - Correcting for reddening with E(B-V) = {ebv:.3f}")
                 corrected_spec = preprocessing.correct_for_reddening(corrected_spec, ebv=ebv)
 
             spectrum_list.append(corrected_spec)
+            epoch_list.append(epoch)
 
             # 3. Bin and Pad
             # Use the corrected spectrum for the rest of the analysis
@@ -131,9 +161,18 @@ def main():
                 'chi_names': np.array(list(chi_indices.keys()), dtype='S')
             }
             preprocessing.save_results(OUTPUT_FILE, sn_name, epoch, results_to_save)
-        
-        # Now plot all spectra
-        preprocessing.plot_spectra(spectrum_list)
+
+        # After processing all epochs for a supernova, plot a summary
+        if spectrum_list:
+            plot_filename = f"{sn_name}_all_epochs.png"
+            plot_output_path = Path(WAVELET_PLOT_DIR) / plot_filename
+            plot_title = f"All Processed Spectra for {sn_name}"
+            preprocessing.plot_spectra(
+                spectrum_list=spectrum_list,
+                epoch_list=epoch_list,
+                output_path=plot_output_path,
+                title=plot_title
+            )
 
 if __name__ == "__main__":
     main()

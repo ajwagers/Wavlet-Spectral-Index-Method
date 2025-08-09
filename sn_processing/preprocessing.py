@@ -101,30 +101,49 @@ def read_spectrum(filepath: Path, epoch: float = None) -> Spectrum:
             
     return None
 
-def plot_spectra(spectrum_list):
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Resample each spectrum to match a common grid
+def plot_spectra(
+    spectrum_list: List[Spectrum],
+    epoch_list: List[float],
+    output_path: Path,
+    title: str
+):
+    """
+    Plots a list of spectra, normalized and offset, and saves the plot to a file.
+    """
+    if not spectrum_list:
+        print("  - No spectra to plot. Skipping plot generation.")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    # Find a common wavelength range for all spectra
     spectral_axis_values = [spec.spectral_axis.value for spec in spectrum_list]
-    spectral_axis_min = min(min(spec) for spec in spectral_axis_values)
-    spectral_axis_max = max(max(spec) for spec in spectral_axis_values)
-    
-    spectral_axis_common = np.linspace(spectral_axis_min, spectral_axis_max)
-    
-    flux_values_common = []
-    for spec in spectrum_list:
-        flux_values = np.interp(spectral_axis_common, spec.spectral_axis.value, spec.flux.value)
-        flux_values_common.append(flux_values / np.max(spec.flux.value))
-    
+    common_min = min(s.min() for s in spectral_axis_values)
+    common_max = max(s.max() for s in spectral_axis_values)
+    common_grid = np.linspace(common_min, common_max, 2000)
+
+    # Sort spectra by epoch for a clean, ordered plot
+    sorted_data = sorted(zip(epoch_list, spectrum_list), key=lambda pair: pair[0])
+
     # Plot each spectrum
-    for i, flux_values in enumerate(flux_values_common):
-        ax.plot(spectral_axis_common, flux_values + (i * 1), label=f"Spectrum {i+1}")
-    
-    ax.set_title("Spectra Plot")
-    ax.set_xlabel("Wavelength (Å)")
-    ax.set_ylabel("Normalized Flux")
-    ax.legend()
-    plt.show()
+    for i, (epoch, spec) in enumerate(sorted_data):
+        interpolated_flux = np.interp(common_grid, spec.spectral_axis.value, spec.flux.value)
+        non_zero_flux = interpolated_flux[interpolated_flux > 0]
+        norm_factor = np.median(non_zero_flux) if len(non_zero_flux) > 0 else 1.0
+        if norm_factor <= 0: norm_factor = 1.0
+        normalized_flux = interpolated_flux / norm_factor
+        offset = i * 0.8
+        ax.plot(common_grid, normalized_flux + offset, label=f"Epoch {epoch:+.1f}")
+
+    ax.set_title(title)
+    ax.set_xlabel("Rest Wavelength (Å)")
+    ax.set_ylabel("Normalized Flux + Offset")
+    ax.legend(title="Epoch (days)", fontsize='small')
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  - Saved summary plot to {output_path}")
 
 
 def measure_redshift_from_template(
@@ -254,6 +273,48 @@ def find_best_redshift(
 
     return best_redshift, best_score, best_template
 
+
+def generate_hsiao_templates(dm15: float, hsiao_data: Dict[str, np.ndarray]) -> List[Spectrum]:
+    """
+    Generates a list of 2D spectra from the 3D Hsiao template for a specific dm15.
+
+    This function interpolates the Hsiao flux cube at the given dm15 value to
+    produce a set of template spectra, one for each phase in the template grid.
+
+    Args:
+        dm15: The target dm15 value to interpolate at.
+        hsiao_data: The loaded Hsiao data cube from `io.load_hsiao_data_cube`.
+
+    Returns:
+        A list of `specutils.Spectrum` objects, one for each phase.
+    """
+    if not hsiao_data:
+        return []
+
+    wavelengths = hsiao_data['wavelengths']
+    phases = hsiao_data['phases']
+    dm15s = hsiao_data['dm15s']
+    flux_cube = hsiao_data['flux_cube']  # Shape: (n_phases, n_dm15s, n_wavelengths)
+
+    generated_templates = []
+    # For each phase, we have a 2D slice of (dm15 vs. wavelength)
+    for i, phase in enumerate(phases):
+        flux_slice_2d = flux_cube[i, :, :]  # Shape: (n_dm15s, n_wavelengths)
+
+        # Create an interpolation function for this phase slice.
+        # It will interpolate along the dm15 axis (axis=0).
+        interp_func = interp1d(
+            dm15s, flux_slice_2d, axis=0, bounds_error=False, fill_value='extrapolate'
+        )
+
+        # Get the interpolated flux array for the target dm15
+        interpolated_flux = interp_func(dm15)
+
+        # Create a Spectrum object (assuming arbitrary flux units for the template)
+        template_spec = Spectrum(spectral_axis=wavelengths*u.AA, flux=interpolated_flux*u.Unit('adu'))
+        generated_templates.append(template_spec)
+
+    return generated_templates
 
 def correct_for_redshift(spectrum: Spectrum, z: float) -> Spectrum:
     """

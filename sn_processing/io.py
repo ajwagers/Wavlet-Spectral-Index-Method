@@ -6,6 +6,7 @@ import pandas as pd
 from functools import lru_cache
 from typing import Any
 from astropy.io import fits
+import numpy as np
 
 def find_template_match(epoch: float) -> List[Path]:
     """Finds template spectra in various libraries that match the given epoch."""
@@ -79,21 +80,59 @@ def load_sn_parameters(param_file: Path = Path('./dm15.dat')) -> pd.DataFrame:
     Loads supernova parameter data from a file into a DataFrame, caching the result.
     The file is expected to be a comma-delimited file without a header.
     """
-    # Define column names based on the dm15.dat file structure
-    col_names = ['SN_name', 'SN_dm15', 'SN_dm15source', 'SN_datasource', 'SN_z']
+    # Define a comprehensive list of column names for the dm15.dat file.
+    # Pandas will handle rows that have fewer columns gracefully.
+    col_names = [
+        'SN_name', 'dm15', 'dm15_source', 'data_source', 'z', 'z_source',
+        'Bmax', 'Bmax_err', 'Bmax_source', 'Vmax', 'Vmax_err', 'Vmax_source',
+        'E(B-V)_MW', 'Host_morphology', 'E(B-V)_host', 'E(B-V)_host_err',
+        'E(B-V)_host_source', 'NaI_D_EW', 'NaI_D_EW_err', 'NaI_D_EW_source',
+        'SiII_vel', 'SiII_vel_grad', 'SiII_EW_1', 'SiII_EW_2', 'SiII_EW_3', 'SiII_source'
+    ]
     try:
         df = pd.read_csv(param_file,
-                         delimiter=r'\s+',  # Use regex for one or more spaces
+                         delimiter=',',      # The file is comma-delimited
                          names=col_names,
                          header=None,
                          comment='#')
-        # Clean and set the SN name as the index for easy lookup
+        # Clean up the data
         df['SN_name'] = df['SN_name'].str.strip().str.lower()
+        # Convert relevant columns to numeric, coercing errors to NaN
+        df['z'] = pd.to_numeric(df['z'], errors='coerce')
+        df['dm15'] = pd.to_numeric(df['dm15'], errors='coerce')
         df.set_index('SN_name', inplace=True)
         return df
     except FileNotFoundError:
         print(f"Warning: Parameter file not found at {param_file}")
         return pd.DataFrame()
+
+@lru_cache(maxsize=1)
+def load_hsiao_data_cube(template_path: Path) -> Dict[str, np.ndarray]:
+    """
+    Loads the 3D Hsiao template data from a NumPy .npz file.
+
+    The .npz file should contain the following arrays:
+    - 'wavelengths': 1D array of wavelength points.
+    - 'phases': 1D array of phase values (days from max light).
+    - 'dm15s': 1D array of dm15 values.
+    - 'flux_cube': 3D array of flux with shape (n_phases, n_dm15s, n_wavelengths).
+
+    Returns:
+        A dictionary containing the template data, or an empty dictionary if not found.
+    """
+    if not template_path.exists():
+        print(f"Warning: Hsiao template data cube not found at {template_path}")
+        return {}
+    try:
+        data = np.load(template_path)
+        # Check for required keys
+        required_keys = ['wavelengths', 'phases', 'dm15s', 'flux_cube']
+        if not all(key in data for key in required_keys):
+            raise KeyError(f"Hsiao template file is missing one of the required keys: {required_keys}")
+        return data
+    except Exception as e:
+        print(f"Error loading Hsiao template data cube: {e}")
+        return {}
 
 def get_sn_redshift(sn_name: str) -> float:
     """Looks up the redshift for a given supernova from the parameter file."""
@@ -101,9 +140,21 @@ def get_sn_redshift(sn_name: str) -> float:
     if params_df.empty:
         return None
     try:
-        return float(params_df.loc[sn_name.lower(), 'SN_z'])
+        redshift = params_df.loc[sn_name.lower(), 'z']
+        return float(redshift) if pd.notna(redshift) else None
     except (KeyError, ValueError):
         print(f"Warning: Redshift not found for {sn_name}")
+        return None
+
+def get_sn_dm15(sn_name: str) -> float:
+    """Looks up the dm15 value for a given supernova from the parameter file."""
+    params_df = load_sn_parameters()
+    if params_df.empty:
+        return None
+    try:
+        dm15 = params_df.loc[sn_name.lower(), 'dm15']
+        return float(dm15) if pd.notna(dm15) else None
+    except (KeyError, ValueError):
         return None
 
 def extract_fits_metadata(filepath: Path) -> Dict[str, Any]:
