@@ -31,6 +31,16 @@ SUPERNOVA_MAX_LIGHT_DATES = {
     # Add other supernovae and their max light dates (in JD) here
 }
 
+# This would also typically be loaded from a parameter file.
+# For now, we define it here. These are example values.
+SUPERNOVA_EBV_VALUES = {
+    'sn1981b': 0.12,
+    'sn1989b': 0.35,
+    'sn1990n': 0.0,
+    'sn1991bg': 0.1,
+    'sn2001el': 0.068,
+}
+
 def main():
     # Create the main plot directory to store visualizations
     Path(WAVELET_PLOT_DIR).mkdir(parents=True, exist_ok=True)
@@ -61,15 +71,26 @@ def main():
             if spec is None:
                 continue
 
-            # Add the current spectrum to the list
-            spectrum_list.append(spec)
+            # 2. Apply Corrections (De-redshifting and De-reddening)
+            # The correct order is to first correct for redshift to get to the
+            # rest frame, then correct for reddening in the rest frame.
+            redshift = io.get_sn_redshift(sn_name)
+            ebv = SUPERNOVA_EBV_VALUES.get(sn_name.lower(), 0.0)
 
-            # 2. TODO: Redshift correction (if needed)
-            # spec = preprocessing.correct_redshift(spec, ...)
+            corrected_spec = spec
+            if redshift is not None and redshift > 0:
+                print(f"    - Correcting for redshift z = {redshift:.4f}")
+                corrected_spec = preprocessing.correct_for_redshift(corrected_spec, z=redshift)
+
+            if ebv > 0:
+                print(f"    - Correcting for reddening with E(B-V) = {ebv:.3f}")
+                corrected_spec = preprocessing.correct_for_reddening(corrected_spec, ebv=ebv)
+
+            spectrum_list.append(corrected_spec)
 
             # 3. Bin and Pad
-            # Example: bin to 5 Angstroms
-            binned_spec = preprocessing.bin_spectrum_constant_wavelength(spec, 5 * u.AA)
+            # Use the corrected spectrum for the rest of the analysis
+            binned_spec = preprocessing.bin_spectrum_constant_wavelength(corrected_spec, 5 * u.AA)
             if binned_spec.uncertainty is not None:
                 print(f"    - Propagating uncertainties through binning and padding.")
             else:

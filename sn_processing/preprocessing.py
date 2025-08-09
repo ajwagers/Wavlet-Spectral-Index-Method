@@ -12,6 +12,7 @@ from astropy.utils.exceptions import AstropyWarning
 import re
 import matplotlib.pyplot as plt
 from sn_processing import io
+import extinction
 
 warnings.simplefilter('ignore', AstropyWarning)
 
@@ -252,6 +253,87 @@ def find_best_redshift(
     best_score, best_redshift, best_template = max(results, key=lambda item: item[0])
 
     return best_redshift, best_score, best_template
+
+
+def correct_for_redshift(spectrum: Spectrum, z: float) -> Spectrum:
+    """
+    Corrects a spectrum to its rest frame (de-redshifts).
+
+    Args:
+        spectrum: The observed spectrum.
+        z: The redshift of the source.
+
+    Returns:
+        A new Spectrum object in the rest frame.
+    """
+    if z < 0:
+        raise ValueError("Redshift z must be non-negative.")
+    if z == 0:
+        return spectrum
+
+    # De-redshift the wavelength axis: lambda_rest = lambda_obs / (1 + z)
+    rest_wavelength = spectrum.spectral_axis / (1 + z)
+
+    # Correct flux for cosmological expansion: F_rest = F_obs * (1 + z)
+    rest_flux = spectrum.flux * (1 + z)
+
+    # Propagate uncertainty if it exists
+    rest_uncertainty = None
+    if spectrum.uncertainty is not None:
+        from astropy.nddata import StdDevUncertainty
+        rest_uncertainty_array = spectrum.uncertainty.array * (1 + z)
+        rest_uncertainty = StdDevUncertainty(rest_uncertainty_array * rest_flux.unit)
+
+    return Spectrum(
+        spectral_axis=rest_wavelength,
+        flux=rest_flux,
+        uncertainty=rest_uncertainty
+    )
+
+
+def correct_for_reddening(spectrum: Spectrum, ebv: float, r_v: float = 3.1) -> Spectrum:
+    """
+    Corrects a spectrum for interstellar reddening using the CCM89 law.
+
+    Args:
+        spectrum: The observed, reddened spectrum.
+        ebv: E(B-V) color excess.
+        r_v: Ratio of total to selective extinction.
+
+    Returns:
+        A new, de-reddened Spectrum object.
+    """
+    if ebv < 0:
+        raise ValueError("E(B-V) must be non-negative.")
+    if ebv == 0:
+        return spectrum
+
+    # Wavelength must be in Angstroms for the extinction package
+    wave_angstrom = spectrum.spectral_axis.to_value(u.AA)
+
+    # Calculate the extinction in magnitudes for each wavelength
+    a_lambda = extinction.ccm89(wave_angstrom, a_v=ebv * r_v, r_v=r_v)
+
+    # Apply the de-reddening correction to the flux
+    dereddened_flux_values = extinction.remove(a_lambda, spectrum.flux.value)
+    dereddened_flux = dereddened_flux_values * spectrum.flux.unit
+
+    # Propagate uncertainty. De-reddening is a multiplicative factor.
+    dereddened_uncertainty = None
+    if spectrum.uncertainty is not None:
+        from astropy.nddata import StdDevUncertainty
+        # The correction factor is dereddened_flux / original_flux
+        correction_factor = dereddened_flux_values / spectrum.flux.value
+        # Replace NaNs or Infs from division by zero with 1 (no change)
+        correction_factor[~np.isfinite(correction_factor)] = 1.0
+        dereddened_uncertainty_array = spectrum.uncertainty.array * correction_factor
+        dereddened_uncertainty = StdDevUncertainty(dereddened_uncertainty_array * dereddened_flux.unit)
+
+    return Spectrum(
+        spectral_axis=spectrum.spectral_axis,
+        flux=dereddened_flux,
+        uncertainty=dereddened_uncertainty
+    )
 
 
 def bin_spectrum_constant_wavelength(spec: Spectrum, bin_width: u.Quantity) -> Spectrum:
